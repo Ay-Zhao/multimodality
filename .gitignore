@@ -18,3 +18,7 @@ Thumbs.db
 
 # Logs
 *.log
+events.out.tfevents.*
+
+# Generated cross-validation runs
+/results/cv_runs/
