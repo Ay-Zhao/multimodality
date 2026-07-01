@@ -233,8 +233,20 @@ if __name__ == "__main__":
     number_of_task = args.n_tasks
     fusion_end_epochs = args.freeze_epoch
 
+    cv_enabled = getattr(args, "cv_folds", 0) is not None and args.cv_folds > 1
+    cv_valid_fold_id = None
+
+    run_name = args.model_name
+    if cv_enabled:
+        if args.cv_fold_id < 0 or args.cv_fold_id >= args.cv_folds:
+            raise ValueError(f"cv_fold_id must be in [0, {args.cv_folds - 1}], got {args.cv_fold_id}")
+        cv_valid_fold_id = (args.cv_fold_id + args.cv_valid_fold_offset) % args.cv_folds
+        if cv_valid_fold_id == args.cv_fold_id:
+            raise ValueError("cv validation fold must be different from test fold. Change --cv_valid_fold_offset.")
+        run_name = f"{args.model_name}_cv{args.cv_folds}_testfold{args.cv_fold_id}_validfold{cv_valid_fold_id}"
+
     # ── TensorBoard ──────────────────────────────────────────────────────────
-    tensorboard_log_dir = os.path.join(args.tensorboard_dir, args.model_name)
+    tensorboard_log_dir = os.path.join(args.tensorboard_dir, run_name)
     os.makedirs(tensorboard_log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
@@ -275,7 +287,32 @@ if __name__ == "__main__":
     # ── Data split ───────────────────────────────────────────────────────────
     is_balance = False
 
-    if args.random_scaffold:
+    if cv_enabled:
+        print("---- in scaffold K-fold cross-validation")
+
+        (
+            train_loader,
+            valid_loader,
+            test_loader,
+            train_size,
+            valid_size,
+            test_size,
+        ) = sd.scaffold_k_fold_split(
+            dataset=molecular_dataset,
+            k=args.cv_folds,
+            fold_id=args.cv_fold_id,
+            valid_fold_id=cv_valid_fold_id,
+            seed=args.random_seed,
+            batch_size=args.batch_size,
+            collate_fn=model_batch.batch_collate_fn_2,
+            save_split=True,
+            split_name=(
+                f"{args.dataset}_seed{args.random_seed}_"
+                f"cv{args.cv_folds}_testfold{args.cv_fold_id}_validfold{cv_valid_fold_id}"
+            ),
+        )
+
+    elif args.random_scaffold:
         print("---- in random scaffold")
 
         (
@@ -297,25 +334,23 @@ if __name__ == "__main__":
             collate_fn=model_batch.batch_collate_fn_2,
         )
     else:
-        # sd.split_data returns only train / test splits.
-        # valid is aliased to test.
-        train_loader, test_loader, train_size, test_size = sd.split_data(
+        (
+            train_loader,
+            valid_loader,
+            test_loader,
+            train_size,
+            valid_size,
+            test_size,
+        ) = sd.split_data(
             molecular_dataset,
             args.random_seed,
             args.batch_size,
             is_balance,
         )
 
-        valid_loader = test_loader
-        valid_size = test_size
-
-    if args.random_scaffold:
-        total_data = train_size + valid_size + test_size
-        print("The length of data:", total_data)
-        print("train_size, valid_size, test_size:", train_size, valid_size, test_size)
-    else:
-        print("The length of data (train + test, valid=test):", train_size + test_size)
-        print("train_size, test_size (valid=test):", train_size, test_size)
+    total_data = train_size + valid_size + test_size
+    print("The length of data:", total_data)
+    print("train_size, valid_size, test_size:", train_size, valid_size, test_size)
 
     print(
         "len(train_loader), len(valid_loader), len(test_loader):",
@@ -356,7 +391,7 @@ if __name__ == "__main__":
 
     checkpoint_dir = "./checkpoint"
     os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_name = f"{checkpoint_dir}/3d_branch_{args.dataset}_{args.model_name}.pth"
+    checkpoint_name = f"{checkpoint_dir}/3d_branch_{args.dataset}_{run_name}.pth"
 
     # =============================================================================
     # Training loop
@@ -608,7 +643,7 @@ if __name__ == "__main__":
 
     os.makedirs(args.csv_dir, exist_ok=True)
 
-    csv_name = f"{args.model_name}.job{job_id}_task{task_id}.epoch_metrics.csv"
+    csv_name = f"{run_name}.job{job_id}_task{task_id}.epoch_metrics.csv"
     csv_path = os.path.join(args.csv_dir, csv_name)
 
     epoch_df.to_csv(csv_path, index=False)
@@ -636,7 +671,14 @@ if __name__ == "__main__":
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "dataset": args.dataset,
         "model_name": getattr(args, "model_name", "no_model_name"),
+        "run_name": run_name,
         "key": args.key,
+
+        # cross-validation info
+        "cv_enabled": bool(cv_enabled),
+        "cv_folds": int(args.cv_folds) if cv_enabled else "",
+        "cv_test_fold_id": int(args.cv_fold_id) if cv_enabled else "",
+        "cv_valid_fold_id": int(cv_valid_fold_id) if cv_enabled else "",
         "seed": args.random_seed,
         "epochs": args.epochs,
         "batch_size": args.batch_size,

@@ -138,7 +138,15 @@ def parse_input():
     parser.add_argument('--token_length_smile', type=int, default=0, help='token length of smile')
     parser.add_argument('--token_length_iupac', type=int, default=0, help='token length of iupac')
     parser.add_argument('--key', type=str, default="smile", help='key of embedding')
-    parser.add_argument('--random_scaffold', type=bool, default=True, help='key of embedding')
+    parser.add_argument('--random_scaffold', type=bool, default=True, help='Use the original 80/10/10 random scaffold split when CV is disabled')
+
+    # Cross-validation controls.
+    # Set --cv_folds 10 to enable 10-fold scaffold CV.
+    # For each run, --cv_fold_id is the test fold, and validation fold is
+    # (cv_fold_id + cv_valid_fold_offset) % cv_folds.
+    parser.add_argument('--cv_folds', type=int, default=0, help='Number of scaffold CV folds. Use 10 for 10-fold CV. Set 0 to disable CV.')
+    parser.add_argument('--cv_fold_id', type=int, default=0, help='Current CV test fold id, from 0 to cv_folds - 1.')
+    parser.add_argument('--cv_valid_fold_offset', type=int, default=1, help='Validation fold offset from test fold in CV mode.')
     parser.add_argument('--weight_decay', type=float, default=4e-4, help='penalty')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
     parser.add_argument('--freeze_epoch', type=int, default=1, help='freeze from 0 - target number epoch for certain model part')
@@ -581,6 +589,146 @@ def random_scaffold_split_generate_anchor(dataset, task_idx=None, null_value=0, 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  collate_fn=collate_fn)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
     test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+    return train_loader, valid_loader, test_loader, len(train_idx), len(valid_idx), len(test_idx)
+
+
+# =============================================================================
+# Scaffold K-fold cross-validation split
+# =============================================================================
+
+def scaffold_k_fold_split(
+    dataset,
+    k=10,
+    fold_id=0,
+    valid_fold_id=None,
+    seed=0,
+    batch_size=16,
+    collate_fn=None,
+    save_split=False,
+    split_name=None,
+    split_dir=None,
+):
+    """
+    Create a scaffold-based K-fold split for molecular property prediction.
+
+    For each run:
+        - test fold  = fold_id
+        - valid fold = valid_fold_id, default (fold_id + 1) % k
+        - train      = all remaining k - 2 folds
+
+    This keeps molecules from the same Bemis-Murcko scaffold in the same fold,
+    reducing scaffold leakage across train/valid/test.
+    """
+    if k < 3:
+        raise ValueError(f"k must be at least 3 because this split needs train, valid, and test folds. Got k={k}.")
+    if fold_id < 0 or fold_id >= k:
+        raise ValueError(f"fold_id must be in [0, {k - 1}]. Got fold_id={fold_id}.")
+
+    if valid_fold_id is None:
+        valid_fold_id = (fold_id + 1) % k
+    if valid_fold_id < 0 or valid_fold_id >= k:
+        raise ValueError(f"valid_fold_id must be in [0, {k - 1}]. Got valid_fold_id={valid_fold_id}.")
+    if valid_fold_id == fold_id:
+        raise ValueError("valid_fold_id must be different from fold_id.")
+
+    print(f"[CV split] seed={seed} | k={k} | test_fold={fold_id} | valid_fold={valid_fold_id}")
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    rng = np.random.RandomState(seed)
+
+    smiles_list = []
+    for idx, data in enumerate(dataset):
+        if data is not None:
+            smiles_list.append((idx, data.smiles))
+
+    scaffolds = defaultdict(list)
+    invalid_smiles = []
+    for idx, smiles in smiles_list:
+        try:
+            scaffold = generate_scaffold(smiles, include_chirality=True)
+            scaffolds[scaffold].append(idx)
+        except ValueError:
+            invalid_smiles.append(smiles)
+
+    if invalid_smiles:
+        pd.DataFrame({'invalid smiles': invalid_smiles}).to_csv("dataset_without_scaffold", index=False)
+
+    scaffold_sets = list(scaffolds.values())
+    rng.shuffle(scaffold_sets)
+    # Large scaffold groups are assigned first for better fold-size balance.
+    # Python sort is stable, so random order is preserved among equal-size groups.
+    scaffold_sets = sorted(scaffold_sets, key=len, reverse=True)
+
+    fold_indices = [[] for _ in range(k)]
+    fold_sizes = [0 for _ in range(k)]
+
+    for scaffold_set in scaffold_sets:
+        target_fold = int(np.argmin(fold_sizes))
+        fold_indices[target_fold].extend(int(i) for i in scaffold_set)
+        fold_sizes[target_fold] += len(scaffold_set)
+
+    test_idx = sorted(fold_indices[fold_id])
+    valid_idx = sorted(fold_indices[valid_fold_id])
+    train_idx = sorted(
+        idx
+        for current_fold, indices in enumerate(fold_indices)
+        if current_fold not in {fold_id, valid_fold_id}
+        for idx in indices
+    )
+
+    print(f"[CV split] fold sizes: {fold_sizes}")
+    print(f"[CV split] train={len(train_idx)} | valid={len(valid_idx)} | test={len(test_idx)}")
+
+    if save_split:
+        if split_dir is None:
+            split_dir = Path("split") / (split_name if split_name else f"cv{k}_seed{seed}_fold{fold_id}")
+        else:
+            split_dir = Path(split_dir)
+
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        np.save(split_dir / "train_idx.npy", np.array(train_idx, dtype=np.int64))
+        np.save(split_dir / "valid_idx.npy", np.array(valid_idx, dtype=np.int64))
+        np.save(split_dir / "test_idx.npy", np.array(test_idx, dtype=np.int64))
+
+        for i, indices in enumerate(fold_indices):
+            np.save(split_dir / f"fold_{i}_idx.npy", np.array(sorted(indices), dtype=np.int64))
+
+        idx_to_smiles = {idx: smi for idx, smi in smiles_list}
+        for split_tag, indices in [
+            ("train", train_idx),
+            ("valid", valid_idx),
+            ("test", test_idx),
+        ]:
+            with open(split_dir / f"{split_tag}_smiles.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(idx_to_smiles[i] for i in indices))
+
+        with open(split_dir / "meta.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "seed": seed,
+                "k": k,
+                "fold_id": fold_id,
+                "valid_fold_id": valid_fold_id,
+                "dataset_size": len(dataset),
+                "train_size": len(train_idx),
+                "valid_size": len(valid_idx),
+                "test_size": len(test_idx),
+                "fold_sizes": fold_sizes,
+            }, f, indent=2)
+
+        print(f"[CV split] Saved to: {split_dir}")
+
+    train_dataset = Subset(dataset, train_idx)
+    valid_dataset = Subset(dataset, valid_idx)
+    test_dataset = Subset(dataset, test_idx)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
     return train_loader, valid_loader, test_loader, len(train_idx), len(valid_idx), len(test_idx)
 
