@@ -170,56 +170,56 @@ class MyOwnDataset(InMemoryDataset):
 
 
 
-import sys
-sys.path.append(r"E:/PycharmProjects/3Dmodality/src/branch_3D")
-import src.branch_3D.uni_tool
-from src.branch_3D.util import DATASET_DIR
-
-from collections import Counter
-
-
-import util as sd
-from src.branch_3D import UniMolModel
-
-if __name__ == '__main__':
-    datasets   = ["clintox_CT_TOX", "clintox_FDA_APPROVED"]
-    seeds      = [0, 1, 2]
-
-    for dataset in datasets:
-        for random_seed in seeds:
-            print(f"\n{'='*50}")
-            print(f"Processing dataset={dataset} | seed={random_seed}")
-            print(f"{'='*50}")
-
-            # ── Load dataset ──────────────────────────────────────
-            molecular_dataset = MyOwnDataset(
-                root=str(DATASET_DIR / dataset),
-                dataset_name=dataset
-            )
-
-            # ── Load model (only needed for collate_fn) ───────────
-            model_batch = UniMolModel(
-                output_dim=767,
-                data_type="molecule",
-                remove_hs=False
-            )
-
-            # ── Generate & save anchor split ──────────────────────
-            train_loader, valid_loader, test_loader, \
-            train_size, valid_size, test_size = \
-                sd.random_scaffold_split_generate_anchor(
-                    dataset=molecular_dataset,
-                    null_value=0,
-                    smiles_list=[],
-                    frac_train=0.8,
-                    frac_valid=0.1,
-                    frac_test=0.1,
-                    seed=random_seed,
-                    batch_size=16,
-                    collate_fn=model_batch.batch_collate_fn_2,
-                    save_split=True,
-                    split_name=f"{dataset}_seed{random_seed}"
-                )
-
-            print(f"[Done] {dataset} seed={random_seed} → "
-                  f"train={train_size} | valid={valid_size} | test={test_size}")
+# import sys
+# sys.path.append(r"E:/PycharmProjects/3Dmodality/src/branch_3D")
+# import src.branch_3D.uni_tool
+# from src.branch_3D.util import DATASET_DIR
+#
+# from collections import Counter
+#
+#
+# import util as sd
+# from src.branch_3D import UniMolModel
+#
+# if __name__ == '__main__':
+#     datasets   = ["clintox_CT_TOX", "clintox_FDA_APPROVED"]
+#     seeds      = [0, 1, 2]
+#
+#     for dataset in datasets:
+#         for random_seed in seeds:
+#             print(f"\n{'='*50}")
+#             print(f"Processing dataset={dataset} | seed={random_seed}")
+#             print(f"{'='*50}")
+#
+#             # ── Load dataset ──────────────────────────────────────
+#             molecular_dataset = MyOwnDataset(
+#                 root=str(DATASET_DIR / dataset),
+#                 dataset_name=dataset
+#             )
+#
+#             # ── Load model (only needed for collate_fn) ───────────
+#             model_batch = UniMolModel(
+#                 output_dim=767,
+#                 data_type="molecule",
+#                 remove_hs=False
+#             )
+#
+#             # ── Generate & save anchor split ──────────────────────
+#             train_loader, valid_loader, test_loader, \
+#             train_size, valid_size, test_size = \
+#                 sd.random_scaffold_split_generate_anchor(
+#                     dataset=molecular_dataset,
+#                     null_value=0,
+#                     smiles_list=[],
+#                     frac_train=0.8,
+#                     frac_valid=0.1,
+#                     frac_test=0.1,
+#                     seed=random_seed,
+#                     batch_size=16,
+#                     collate_fn=model_batch.batch_collate_fn_2,
+#                     save_split=True,
+#                     split_name=f"{dataset}_seed{random_seed}"
+#                 )
+#
+#             print(f"[Done] {dataset} seed={random_seed} → "
+#                   f"train={train_size} | valid={valid_size} | test={test_size}")
